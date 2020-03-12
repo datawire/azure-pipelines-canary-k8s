@@ -19,11 +19,18 @@ variables:
   # tags for images: the tag for the image in the base Deployment, and the tag in the new build
   baseTag: '$(Build.BuildId)'
   buildTag: '$(Build.BuildId)'
+  # Azure environmental details
+  azureSubscriptionEndpoint: 'Microsoft Azure Sponsorship (cbbfcff1-a4e6-4a1b-9d3d-48e9bbb039bb)'
+  azureResourceGroup: 'Ambassador-Azure-Pipeline'
+  kubernetesCluster: 'Ambassador-Azure-Pipeline'
   # replace with name of your Docker registry service connection
   # we assume the registry will have the same name (ie, $(containerRegistry).azurecr.io)
   containerRegistry: azurepipelinescanaryk8s
-  environment: k8sEnvironment.default # replace with the of your Kubernetes service connection and namespace
+  environment: k8sEnvironment # replace with the of your Kubernetes service connection and namespace
   imageName: azure-pipelines-canary-k8s
+  # URL for testing the canary (and minimum succes rate required)
+  successURL: http://sampleapp:8000
+  successRate: 98
 
 stages:
 - stage: Build
@@ -53,7 +60,7 @@ stages:
   jobs:
   - deployment: Deploy_Static_Manifests
     displayName: Deploy Static Manifests
-    environment: $(environment)
+    environment: $(environment).$(namespace)
     strategy:
       runOnce:
         deploy:
@@ -70,7 +77,7 @@ stages:
 
           # Other deployments in the Kubernetes cluster
           - task: KubernetesManifest@0
-            displayName: Deploy Fortio and ServiceMonitor
+            displayName: Deploy support tools
             inputs:
               action: deploy
               manifests: $(Build.SourcesDirectory)/misc/*
@@ -78,7 +85,7 @@ stages:
   - deployment: Deploy_Base
     dependsOn: Deploy_Static_Manifests
     displayName: Deploy Base
-    environment: $(environment)
+    environment: $(environment).$(namespace)
     strategy:
       runOnce:
         deploy:
@@ -98,11 +105,10 @@ stages:
   - deployment: Deploy_Canary
     dependsOn: Deploy_Base
     displayName: Deploy Canary
-    environment: $(environment)
+    environment: $(environment).$(namespace)
     strategy:
       canary:
         increments: [25, 50]
-
         deploy:
           steps:
           # create a clone of the Base manifests we already applied, but "canarized":
@@ -124,13 +130,21 @@ stages:
               manifests: $(Pipeline.Workspace)/canary.yml
               imagePullSecrets: $(imageName)
 
-        # postRouteTraffic:
-        #   # postRouteTraffic - Use to run the tasks after the traffic is routed. Typically these tasks
-        #   # monitor the health of the updated version for defined interval. The results of a lifecycle
-        #   # hook event can trigger a rollback.
-        #   steps:
-        #   - checkout: self
-        #   - script: ./deploy/perform-e2e-tests.sh
+        postRouteTraffic:
+          # Monitor the health of the updated version for a defined interval. In this case,
+          # will check that we get at least 98% success when querying the sampleapp
+          steps:
+          - checkout: self
+          - task: Kubernetes@1
+            displayName: Kubernetes login
+            inputs:
+              command: login
+              connectionType: 'Azure Resource Manager'
+              azureSubscriptionEndpoint: $(azureSubscriptionEndpoint)
+              azureResourceGroup: $(azureResourceGroup)
+              kubernetesCluster: $(kubernetesCluster)
+          - script: $(Build.SourcesDirectory)/deploy/stress.sh "$(successURL)" $(successRate)
+            displayName: Check $(successURL) >$(successRate)% success
 
         on:
           # if the canary has failed,
